@@ -11,6 +11,50 @@
 
 namespace znet {
 
+    struct TcpLineReader
+    {
+        std::string currentLine;
+
+        void processNewInputData(const std::vector<char> &recvBuffer,
+                                 int count,
+                                 LineReceivedCallback lineReceivedCb)
+        {
+            if (count < 1)
+                return;
+
+            auto bufferEndIt = recvBuffer.begin() + count;
+            auto bufferStartIt = recvBuffer.begin();
+
+            std::string debugStr (bufferStartIt, bufferEndIt);
+            std::cerr << "inputStr = " << debugStr << std::endl;
+            std::cerr << "inputStr.back() = " << (int)debugStr.back() << std::endl;
+
+            do {
+                bool foundEndOfLine = false;
+                auto newLineIt = std::find (bufferStartIt, bufferEndIt, '\n');
+                if (newLineIt != bufferEndIt)
+                {
+                    foundEndOfLine = true;
+                    ++newLineIt; // include the \n
+                }
+
+                currentLine.append (bufferStartIt, newLineIt);
+                if (foundEndOfLine)
+                {
+                    if (lineReceivedCb)
+                        lineReceivedCb(currentLine);
+                    currentLine.clear ();
+                }
+
+                bufferStartIt = newLineIt;
+            } while (bufferStartIt != bufferEndIt);
+        }
+    };
+
+} // znet
+
+namespace znet {
+
     static void lineTcpClientOnConnection(void *ud, zn_Tcp *tcp, unsigned err);
     static void lineTcpClientOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
     static void lineTcpClientOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
@@ -18,7 +62,7 @@ namespace znet {
     struct LineTcpClient::Impl
     {
         LineReceivedCallback lineReceivedCb = nullptr;
-        ClientConnectedCallback clientConnectedCb = nullptr;
+        ConnectedToServerCallback connectedToServerCb = nullptr;
         std::atomic_bool connected { false };
         std::string serverIp;
         int serverPort = -1;
@@ -31,6 +75,8 @@ namespace znet {
 
         int numConnectionAttempts = 0;
 
+        TcpLineReader lineReader;
+
         void onConnection (unsigned err)
         {
             if (err != ZN_OK)
@@ -40,6 +86,7 @@ namespace znet {
                         tcp, zn_strerror(err));
                 if (++numConnectionAttempts < 10)
                 {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     fprintf(stderr, "[%p client trying again (%d times)! :-/ \n",
                             tcp, numConnectionAttempts);
                     zn_connect(tcp, serverIp.c_str(), serverPort, lineTcpClientOnConnection, this);
@@ -58,8 +105,8 @@ namespace znet {
             fprintf(stderr, "[%p] client connected to server now!\n", tcp);
             connected = true;
 
-            if (clientConnectedCb)
-                clientConnectedCb();
+            if (connectedToServerCb)
+                connectedToServerCb();
         }
 
         void onMessageSent(unsigned err, unsigned count)
@@ -84,27 +131,8 @@ namespace znet {
                 return;
             }
 
-            std::cerr << "count = " << count << std::endl;
-            std::string str (recvBuffer.begin(), recvBuffer.end());
-            // fprintf (stderr, "Received string %s (count=%d)\n", str.c_str(), count);
-
-            auto bufferStartIt = recvBuffer.begin();
-            do {
-                auto newLineIt = std::find (bufferStartIt, recvBuffer.end(), '\n');
-                if (newLineIt != recvBuffer.end())
-                    ++newLineIt; // include the \n
-
-                currentLine.append (bufferStartIt, newLineIt);
-                if (newLineIt != recvBuffer.end())
-                {
-                    if (lineReceivedCb)
-                        lineReceivedCb(currentLine);
-                    currentLine.clear ();
-                }
-
-                bufferStartIt = newLineIt;
-            } while (bufferStartIt != recvBuffer.end());
-
+            std::cerr << "client received " << count << " bytes" << std::endl;
+            lineReader.processNewInputData (recvBuffer, count, lineReceivedCb);
             zn_recv(tcp, recvBuffer.data(), recvBuffer.size(), lineTcpClientOnRecv, this);
         }
     };
@@ -139,11 +167,11 @@ namespace znet {
             d->lineReceivedCb = cb;
     }
 
-    void LineTcpClient::setClientConnectedCallback (ClientConnectedCallback cb)
+    void LineTcpClient::setConnectedToServerCallback (ConnectedToServerCallback cb)
     {
         assert (!d->connected); // Cannot assign it once connected, not thread-safe.        
         if (!d->connected)
-            d->clientConnectedCb = cb;
+            d->connectedToServerCb = cb;
     }
 
     bool LineTcpClient::connectToServer (const std::string& serverIp, int port)
@@ -155,6 +183,8 @@ namespace znet {
             return false;
         }
         d->tcp = zn_newtcp(d->state);
+        d->serverIp = serverIp;
+        d->serverPort = port;
         zn_connect(d->tcp, serverIp.c_str(), port, lineTcpClientOnConnection, d.get());
         return false;
     }
@@ -163,19 +193,19 @@ namespace znet {
     {
         zn_close(d->state);
         zn_deinitialize();
-        return false;
+        return true;
     }
 
     bool LineTcpClient::sendString (const std::string& str)
     {
-        zn_send(d->tcp, str.c_str(), str.size(), lineTcpClientOnMessageSent, d.get());
-        return false;
-    }
+        if (!d->tcp)
+        {
+            fprintf (stderr, "Connection closed!\n");
+            return false;
+        }
 
-    void LineTcpClient::waitUntilConnected ()
-    {
-        while (!d->connected)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        zn_send(d->tcp, str.c_str(), str.size(), lineTcpClientOnMessageSent, d.get());
+        return true;
     }
 
     void LineTcpClient::runLoop ()
@@ -188,24 +218,216 @@ namespace znet {
         }
     }
 
-    // class LineTcpServer
-    // {
-    // public:
-    //     void setLineReceivedCallback (LineReceivedCallback cb);
-
-    // public:
-    //     bool startListening (int port);
-    //     bool disconnect ();
-    //     bool sendString (const std::string& str);
-
-    // private:
-    //     struct Impl; friend struct impl;
-    //     std::unique_ptr<Impl> d;
-    // };
-
 } // znet
 
-int main()
+namespace znet {
+    
+        static void lineTcpServerOnAccept(void *ud, zn_Accept *accept, unsigned err, zn_Tcp *tcp);
+        static void lineTcpServerOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
+        static void lineTcpServerOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
+    
+        struct LineTcpServer::Impl
+        {
+            LineReceivedCallback lineReceivedCb = nullptr;
+            ClientConnectedCallback clientConnectedCb = nullptr;
+            ClientDisconnectedCallback clientDisconnectedCb = nullptr;
+
+            std::string serverIp;
+            int serverPort = -1;
+            
+            zn_Accept* accept = nullptr;
+            zn_State* state = nullptr;
+            zn_Tcp* tcp = nullptr;
+
+            std::vector<char> recvBuffer;
+            std::string currentLine;
+    
+            int numConnectionAttempts = 0;
+    
+            std::atomic_bool listening { false };
+
+            int activeConnectionId = 0;
+
+            TcpLineReader lineReader;
+
+            void onAccept (unsigned err, zn_Tcp* incomingTcp)
+            {
+                if (err != ZN_OK)
+                { /* not lucky? let's try again. */
+                    /* we use ud to find out which time we tried. */
+                    fprintf(stderr, "[%p] server could not accept client. (%s)\n",
+                            tcp, zn_strerror(err));
+                    return;
+                }
+
+                ++activeConnectionId;
+                tcp = incomingTcp;
+    
+                recvBuffer.resize (2048);
+                zn_recv(tcp, recvBuffer.data(), recvBuffer.size(), lineTcpServerOnRecv, this);
+    
+                fprintf(stderr, "[%p] server accepted a client!\n", tcp);
+                listening = true;
+    
+                if (clientConnectedCb)
+                    clientConnectedCb(activeConnectionId);
+
+                // Note: would need to call accept here to accept several clients.
+            }
+    
+            void onMessageSent(unsigned err, unsigned count)
+            {
+                /* send work may error out, we first check the result code: */
+                if (err != ZN_OK)
+                {
+                    fprintf(stderr, "[%p] client error when sending something: %s\n",
+                            tcp, zn_strerror(err));
+                    closeConnection();
+                    return;
+                }
+            }
+    
+            void onMessageReceived(unsigned err, unsigned count)
+            {
+                if (err != ZN_OK)
+                {
+                    fprintf(stderr, "[%p] server error when receiving something: %s\n",
+                            tcp, zn_strerror(err));
+                    closeConnection();
+                    return;
+                }
+    
+                std::cerr << "server received " << count << " bytes" << std::endl;
+    
+                lineReader.processNewInputData (recvBuffer, count, lineReceivedCb);
+    
+                zn_recv(tcp, recvBuffer.data(), recvBuffer.size(), lineTcpServerOnRecv, this);
+            }
+
+            void closeConnection ()
+            {
+                zn_deltcp(tcp); /* and we close connection. */
+                tcp = nullptr;
+                if (clientDisconnectedCb)
+                    clientDisconnectedCb(activeConnectionId);                
+            }
+        };
+    
+        LineTcpServer::LineTcpServer()
+        : d (new Impl())
+        {}
+    
+        LineTcpServer::~LineTcpServer () = default;
+    
+        static void lineTcpServerOnAccept(void *ud, zn_Accept *accept, unsigned err, zn_Tcp *tcp) {
+            LineTcpServer::Impl *impl = (LineTcpServer::Impl*)ud;
+            impl->onAccept (err, tcp);
+        }
+    
+        static void lineTcpServerOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
+            LineTcpServer::Impl *impl = (LineTcpServer::Impl*)ud;
+            impl->onMessageSent (err, count);
+        }
+    
+        static void lineTcpServerOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
+            LineTcpServer::Impl *impl = (LineTcpServer::Impl*)ud;
+            impl->onMessageReceived (err, count);
+        }
+    
+        void LineTcpServer::setLineReceivedCallback (LineReceivedCallback cb)
+        {
+            assert (!d->listening); // Cannot assign it once connected, not thread-safe.
+            if (!d->listening)
+                d->lineReceivedCb = cb;
+        }
+    
+        void LineTcpServer::setClientConnectedCallback (ClientConnectedCallback cb)
+        {
+            assert (!d->listening); // Cannot assign it once connected, not thread-safe.        
+            if (!d->listening)
+                d->clientConnectedCb = cb;
+        }
+
+        void LineTcpServer::setClientDisconnectedCallback (ClientDisconnectedCallback cb)
+        {
+            assert (!d->listening); // Cannot assign it once connected, not thread-safe.        
+            if (!d->listening)
+                d->clientDisconnectedCb = cb;
+        }
+    
+        bool LineTcpServer::startListening (int port)
+        {
+            zn_initialize(); // safe to call multiple times.
+            d->state = zn_newstate();
+            if (!d->state) {
+                fprintf(stderr, "[ZNET] create handler failed\n");
+                return false;
+            }
+
+            /* create a znet tcp server */
+            d->accept = zn_newaccept(d->state);
+
+            /* this server listen to 8080 port */
+            int err = zn_listen(d->accept, "0.0.0.0", port);
+            if (err == ZN_OK)
+            {
+                fprintf(stderr, "[%p] accept listening to %d ...\n", d->accept, port);
+            }
+            else
+            {
+                fprintf (stderr, "[ZNET] Could not listen on port %d (%s)\n", port, zn_strerror(err));
+                return false;
+            }
+
+            /* this server and when new connection coming, on_accept()
+             * function will be called.
+             * the 3rd argument of zn_accept will be send to on_accept as-is.
+             * we don't use this pointer here, but will use in when send
+             * messages. (all functions that required a callback function
+             * pointer all have this user-data pointer */
+            zn_accept(d->accept, lineTcpServerOnAccept, d.get());
+            return true;
+        }
+    
+        bool LineTcpServer::disconnect ()
+        {
+            zn_close(d->state);
+            zn_deinitialize();
+            return true;
+        }
+    
+        bool LineTcpServer::sendString (const std::string& str)
+        {
+            if (!d->tcp)
+            {
+                fprintf (stderr, "Connection closed!\n");
+                return false;
+            }
+            zn_send(d->tcp, str.c_str(), str.size(), lineTcpClientOnMessageSent, d.get());
+            return true;
+        }
+        
+        void LineTcpServer::runLoop ()
+        {
+            int err = ZN_OK;
+            while (err == ZN_OK)
+            {
+                err = zn_run(d->state, ZN_RUN_LOOP);
+                if (err != ZN_OK)
+                {
+                    fprintf(stderr, "[%p] client runloop finished: %s\n",
+                            d->tcp, zn_strerror(err));
+                }
+
+                // Finished the loop, means the client disconnected. Now
+                // create a new accept to get ready for a new client.
+                zn_accept(d->accept, lineTcpServerOnAccept, d.get());
+            }
+        }
+    
+    } // znet
+
+int mainClient()
 {
     znet::LineTcpClient tcpClient;
     
@@ -213,7 +435,7 @@ int main()
         std::cerr << "Received line: " << str;
     });
 
-    tcpClient.setClientConnectedCallback ([&tcpClient]() {
+    tcpClient.setConnectedToServerCallback ([&tcpClient]() {
         std::cerr << "Connected!" << std::endl;
         tcpClient.sendString("hello\n");
     });
@@ -222,10 +444,58 @@ int main()
         while (true)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            tcpClient.sendString ("proutFromThread");
+            tcpClient.sendString ("proutFromThread\n");
         }
     });
 
     tcpClient.connectToServer ("127.0.0.1", 4999);
     tcpClient.runLoop ();
+    return 0;
+}
+
+int mainServer()
+{
+    znet::LineTcpServer tcpServer;
+    
+    tcpServer.setLineReceivedCallback ([](const std::string& str) {
+        std::cerr << "Received line: " << str;
+    });
+
+    std::thread t;
+    bool shouldStop = false;
+
+    tcpServer.setClientConnectedCallback ([&](int id) {
+        std::cerr << "Client connected!" << std::endl;
+        tcpServer.sendString("hello from server\n");
+        shouldStop = false;
+        t = std::thread ([&](){
+            while (!shouldStop)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                tcpServer.sendString ("proutFromThread\n");
+            }
+        });
+    });
+
+    tcpServer.setClientDisconnectedCallback ([&](int id) {
+        shouldStop = true;
+        t.join ();
+    });
+
+    if (!tcpServer.startListening (4999))
+    {
+        std::cerr << "Fatal error, exiting." << std::endl;
+        return 1;
+    }
+    tcpServer.runLoop ();
+    return 0;
+}
+
+int main ()
+{
+    return mainServer ();
+    
+    // Test server on macOS
+    // socat -v tcp-l:4999,reuseaddr,fork exec:'/bin/cat'
+    // return mainClient ();
 }
