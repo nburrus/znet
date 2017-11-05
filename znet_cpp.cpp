@@ -9,6 +9,8 @@
 #include <vector>
 #include <iostream>
 #include <atomic>
+#include <queue>
+#include <condition_variable>
 
 namespace znet {
 
@@ -18,6 +20,140 @@ namespace znet {
         ImplT* impl;
         std::string str;
     };
+
+    static void messageSenderOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
+
+    struct MessageSender
+    {
+        void start (zn_Tcp* tcp)
+        {
+            if (_tcp)
+            {
+                stop();
+                fprintf (stderr, "Stopped before starting a new one.\n");
+            }            
+
+            _tcp = tcp;
+            _shouldExit = false;
+            _loopThread = std::thread([this]() {
+                runLoop ();
+            });
+        }
+
+        void stop ()
+        {
+            _shouldExit = true;
+            _eventCondition.notify_one();
+            _loopThread.join ();
+            _tcp = nullptr;
+            while (!_messagesToSend.empty()) _messagesToSend.pop();
+        }
+
+        void sendString (const std::string& s)
+        {
+            std::unique_lock<std::mutex> _(_queueMutex);
+            _messagesToSend.push (std::unique_ptr<std::string>(new std::string(s)));
+            _eventCondition.notify_one();
+        }
+
+    private:
+        void runLoop ()
+        {
+            while (!_shouldExit)
+            {
+                std::unique_lock<std::mutex> lk(_queueMutex);
+                _eventCondition.wait(lk, [this]() { 
+                    return _shouldExit || (!_messagesToSend.empty() && !_hasMessageInFlight);
+                });
+
+                if (_shouldExit)
+                    break;
+                
+                // Already busy sending messages, we'll keep flushing the queue
+                // in the callback of zn_send.
+                if (_hasMessageInFlight)
+                    continue;
+
+                if (!_hasMessageInFlight && !_messagesToSend.empty())
+                {
+                    sendNextMessage();
+                }
+            }
+
+            while (_hasMessageInFlight)
+            {
+                fprintf(stderr, "Waiting for in-flight messages...\n");
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+        }
+
+        void sendNextMessage ()
+        {
+            _hasMessageInFlight = true;
+            _numBytesSentFromFrontString = 0;
+            auto* str = _messagesToSend.front().get();
+            zn_send(_tcp,
+                    str->c_str(),
+                    (unsigned)str->size(),
+                    messageSenderOnMessageSent,
+                    this);
+        }
+
+    public: // fake public for the static function.
+        void onDataSent (unsigned err, unsigned count)
+        {
+            /* send work may error out, we first check the result code: */
+            if (err != ZN_OK)
+            {
+                fprintf(stderr, "[%p] client error when sending something: %s\n",
+                        _tcp, zn_strerror(err));
+                // zn_deltcp(_tcp); /* and we close connection. */
+                _hasMessageInFlight = false;
+                _shouldExit = true;
+                _eventCondition.notify_one();
+                return;
+            }
+
+            std::unique_lock<std::mutex> lk(_queueMutex);
+            auto* str = _messagesToSend.front().get();
+            _numBytesSentFromFrontString += count;
+            if (_numBytesSentFromFrontString == (unsigned)str->size())
+            {
+                _messagesToSend.pop();
+                _numBytesSentFromFrontString = 0;
+
+                if (_messagesToSend.empty())
+                {
+                    _hasMessageInFlight = false;
+                    _eventCondition.notify_one();
+                }
+                else
+                {
+                    sendNextMessage();
+                }
+            }
+            else
+            {
+                // case where string was only sent partially not handled yet.
+                assert(false);
+            }
+        }
+
+    private:
+        zn_Tcp* _tcp = nullptr;
+        std::queue<std::unique_ptr<std::string>> _messagesToSend;
+        unsigned _numBytesSentFromFrontString = 0;
+        std::mutex _queueMutex;
+        std::thread _loopThread;
+        bool _shouldExit = false;
+        std::condition_variable _eventCondition;
+        std::atomic_bool _hasMessageInFlight { false };
+    };
+
+    static void messageSenderOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
+        auto* sender = reinterpret_cast<MessageSender*>(ud);
+        sender->onDataSent (err, count);
+    }
 
     struct TcpLineReader
     {
@@ -263,6 +399,7 @@ namespace znet {
             int activeConnectionId = 0;
 
             TcpLineReader lineReader;
+            MessageSender messageSender;
 
             void onAccept (unsigned err, zn_Tcp* incomingTcp)
             {
@@ -277,6 +414,8 @@ namespace znet {
                 ++activeConnectionId;
                 tcp = incomingTcp;
     
+                messageSender.start (tcp);
+
                 recvBuffer.resize (2048);
                 zn_recv(tcp, recvBuffer.data(), (unsigned)recvBuffer.size(), lineTcpServerOnRecv, this);
     
@@ -320,6 +459,7 @@ namespace znet {
 
             void closeConnection ()
             {
+                messageSender.stop ();
                 zn_deltcp(tcp); /* and we close connection. */
                 tcp = nullptr;
                 if (clientDisconnectedCb)
@@ -420,11 +560,13 @@ namespace znet {
                 return false;
             }
 
-            auto* data = new TcpSendData<LineTcpServer::Impl>();
-            data->impl = d.get();
-            data->str = std::move(str);
+            d->messageSender.sendString (str);
 
-            zn_send(d->tcp, data->str.c_str(), (unsigned)data->str.size(), lineTcpServerOnMessageSent, data);
+            // auto* data = new TcpSendData<LineTcpServer::Impl>();
+            // data->impl = d.get();
+            // data->str = std::move(str);
+
+            // zn_send(d->tcp, data->str.c_str(), (unsigned)data->str.size(), lineTcpServerOnMessageSent, data);
             return true;
         }
         
@@ -464,7 +606,7 @@ int mainClient()
     std::thread t ([&tcpClient](){
         while (true)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            // std::this_thread::sleep_for(std::chrono::milliseconds(200));
             tcpClient.sendString ("proutFromThread\n");
         }
     });
@@ -492,7 +634,7 @@ int mainServer()
         t = std::thread ([&](){
             while (!shouldStop)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 tcpServer.sendString ("proutFromThread\n");
             }
         });
@@ -503,7 +645,7 @@ int mainServer()
         t.join ();
     });
 
-    if (!tcpServer.startListening (4999))
+    if (!tcpServer.startListening (4998))
     {
         std::cerr << "Fatal error, exiting." << std::endl;
         return 1;
