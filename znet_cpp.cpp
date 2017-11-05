@@ -11,9 +11,11 @@
 #include <atomic>
 #include <queue>
 #include <condition_variable>
+#include <sstream>
+#include <chrono>
 
 namespace znet {
-
+    
     template <class ImplT>
     struct TcpSendData
     {
@@ -569,23 +571,116 @@ namespace znet {
     
     } // znet
 
+namespace znet {
+
+    class ClockSynchronizer
+    {
+        struct ClockRequest
+        {
+            uint64_t msecsClient = 0;
+            int requestId = -1;
+        };
+
+    public:
+        ClockSynchronizer (LineTcpClient* client, LineTcpServer* server)
+        : _client (client), _server(server)
+        {}
+
+        void clientStartSynchronizing ()
+        {
+            _requests.resize (10);
+
+            std::stringstream ss;
+            
+            auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            ss << "CLOCK " << _nextRequestId << std::endl;
+
+            auto& rq = _requests[_nextRequestId];
+            rq.msecsClient = nowClientMicrosecs;
+            rq.requestId = _nextRequestId;
+
+            _client->sendString (ss.str());
+
+            ++_nextRequestId;
+        }
+
+        void onReceiveLineFromServer (const std::string& line)
+        {
+            std::istringstream stream (line);
+            std::string command;
+            stream >> command;
+            if (stream.fail())
+                return;
+            if (command != "CLOCK")
+                return;
+            int requestId = -1;
+            stream >> requestId;
+            if (stream.fail())
+                return;
+
+            uint64_t serverNowMsecs = 0;
+            stream >> serverNowMsecs;
+            if (stream.fail())
+                return;
+
+            assert (requestId < _requests.size());
+            auto& rq = _requests[requestId];
+            fprintf (stderr, "Offset in usecs = %lld\n", serverNowMsecs - rq.msecsClient);
+        }
+
+        void onReceiveLineFromClient (const std::string& line)
+        {
+            std::istringstream stream (line);
+            std::string command;
+            stream >> command;
+            fprintf (stderr, "CLOCK received command '%s'\n", command.c_str());
+            if (stream.fail())
+                return;
+            if (command != "CLOCK")
+                return;
+            int requestId = -1;
+            stream >> requestId;
+            if (stream.fail())
+                return;
+
+            std::stringstream ss;
+
+            auto nowMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            ss << "CLOCK " << _nextRequestId << " " << nowMicrosecs << std::endl;
+            _server->sendString(ss.str());
+        }
+
+    private:
+        LineTcpClient* _client = nullptr;
+        LineTcpServer* _server = nullptr;
+        int _nextRequestId = 0;
+        std::vector<ClockRequest> _requests;
+    };
+} // znet
+
 int mainClient()
 {
     znet::LineTcpClient tcpClient;
     
-    tcpClient.setLineReceivedCallback ([](const std::string& str) {
+    std::unique_ptr<znet::ClockSynchronizer> clockSync;
+
+    tcpClient.setLineReceivedCallback ([&](const std::string& str) {
         std::cerr << "Received line: " << str;
+        clockSync->onReceiveLineFromServer(str);
     });
 
-    tcpClient.setConnectedToServerCallback ([&tcpClient]() {
+    tcpClient.setConnectedToServerCallback ([&]() {
         std::cerr << "Connected!" << std::endl;
         tcpClient.sendString("hello\n");
+
+        clockSync.reset (new znet::ClockSynchronizer(&tcpClient, nullptr));
+        clockSync->clientStartSynchronizing ();
     });
 
     std::thread t ([&tcpClient](){
         while (true)
         {
-            // std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
             tcpClient.sendString ("proutFromThread\n");
         }
     });
@@ -599,8 +694,11 @@ int mainServer()
 {
     znet::LineTcpServer tcpServer;
     
-    tcpServer.setLineReceivedCallback ([](const std::string& str) {
+    std::unique_ptr<znet::ClockSynchronizer> clockSync;
+
+    tcpServer.setLineReceivedCallback ([&](const std::string& str) {
         std::cerr << "Received line: " << str;
+        clockSync->onReceiveLineFromClient(str);
     });
 
     std::thread t;
@@ -610,10 +708,11 @@ int mainServer()
         std::cerr << "Client connected!" << std::endl;
         tcpServer.sendString("hello from server\n");
         shouldStop = false;
+        clockSync.reset (new znet::ClockSynchronizer(nullptr, &tcpServer));
         t = std::thread ([&](){
             while (!shouldStop)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 tcpServer.sendString ("proutFromThread\n");
             }
         });
@@ -635,9 +734,9 @@ int mainServer()
 
 int main ()
 {
-    // return mainServer ();
+    return mainServer ();
     
     // Test server on macOS
     // socat -v tcp-l:4998,reuseaddr,fork exec:'/bin/cat'
-    return mainClient ();
+    // return mainClient ();
 }
