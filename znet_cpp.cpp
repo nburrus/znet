@@ -8,8 +8,16 @@
 #include <thread>
 #include <vector>
 #include <iostream>
+#include <atomic>
 
 namespace znet {
+
+    template <class ImplT>
+    struct TcpSendData
+    {
+        ImplT* impl;
+        std::string str;
+    };
 
     struct TcpLineReader
     {
@@ -100,7 +108,7 @@ namespace znet {
             }
 
             recvBuffer.resize (2048);
-            zn_recv(tcp, recvBuffer.data(), recvBuffer.size(), lineTcpClientOnRecv, this);
+            zn_recv(tcp, recvBuffer.data(), (unsigned)recvBuffer.size(), lineTcpClientOnRecv, this);
 
             fprintf(stderr, "[%p] client connected to server now!\n", tcp);
             connected = true;
@@ -133,7 +141,7 @@ namespace znet {
 
             std::cerr << "client received " << count << " bytes" << std::endl;
             lineReader.processNewInputData (recvBuffer, count, lineReceivedCb);
-            zn_recv(tcp, recvBuffer.data(), recvBuffer.size(), lineTcpClientOnRecv, this);
+            zn_recv(tcp, recvBuffer.data(), (unsigned)recvBuffer.size(), lineTcpClientOnRecv, this);
         }
     };
 
@@ -151,8 +159,10 @@ namespace znet {
     }
 
     static void lineTcpClientOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
-        LineTcpClient::Impl *impl = (LineTcpClient::Impl*)ud;
-        impl->onMessageSent (err, count);
+        auto* data = reinterpret_cast<TcpSendData<LineTcpClient::Impl>*>(ud);
+        data->impl->onMessageSent(err, count);
+        delete data; // it was allocated on the heap.
+        data = nullptr;
     }
 
     static void lineTcpClientOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
@@ -204,7 +214,11 @@ namespace znet {
             return false;
         }
 
-        zn_send(d->tcp, str.c_str(), str.size(), lineTcpClientOnMessageSent, d.get());
+        auto* data = new TcpSendData<LineTcpClient::Impl>();
+        data->impl = d.get();
+        data->str = std::move(str);
+
+        zn_send(d->tcp, str.c_str(), (unsigned)str.size(), lineTcpClientOnMessageSent, data);
         return true;
     }
 
@@ -264,7 +278,7 @@ namespace znet {
                 tcp = incomingTcp;
     
                 recvBuffer.resize (2048);
-                zn_recv(tcp, recvBuffer.data(), recvBuffer.size(), lineTcpServerOnRecv, this);
+                zn_recv(tcp, recvBuffer.data(), (unsigned)recvBuffer.size(), lineTcpServerOnRecv, this);
     
                 fprintf(stderr, "[%p] server accepted a client!\n", tcp);
                 listening = true;
@@ -301,7 +315,7 @@ namespace znet {
     
                 lineReader.processNewInputData (recvBuffer, count, lineReceivedCb);
     
-                zn_recv(tcp, recvBuffer.data(), recvBuffer.size(), lineTcpServerOnRecv, this);
+                zn_recv(tcp, recvBuffer.data(), (unsigned)recvBuffer.size(), lineTcpServerOnRecv, this);
             }
 
             void closeConnection ()
@@ -325,8 +339,10 @@ namespace znet {
         }
     
         static void lineTcpServerOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
-            LineTcpServer::Impl *impl = (LineTcpServer::Impl*)ud;
-            impl->onMessageSent (err, count);
+            auto* data = reinterpret_cast<TcpSendData<LineTcpServer::Impl>*>(ud);
+            data->impl->onMessageSent (err, count);
+            delete data; // it was allocated on the heap.
+            data = nullptr;
         }
     
         static void lineTcpServerOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
@@ -395,7 +411,7 @@ namespace znet {
             zn_deinitialize();
             return true;
         }
-    
+
         bool LineTcpServer::sendString (const std::string& str)
         {
             if (!d->tcp)
@@ -403,7 +419,12 @@ namespace znet {
                 fprintf (stderr, "Connection closed!\n");
                 return false;
             }
-            zn_send(d->tcp, str.c_str(), str.size(), lineTcpClientOnMessageSent, d.get());
+
+            auto* data = new TcpSendData<LineTcpServer::Impl>();
+            data->impl = d.get();
+            data->str = std::move(str);
+
+            zn_send(d->tcp, data->str.c_str(), (unsigned)data->str.size(), lineTcpServerOnMessageSent, data);
             return true;
         }
         
