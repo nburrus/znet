@@ -49,11 +49,12 @@ namespace znet {
             while (!_messagesToSend.empty()) _messagesToSend.pop();
         }
 
-        void sendString (const std::string& s)
+        bool sendString (const std::string& s)
         {
             std::unique_lock<std::mutex> _(_queueMutex);
             _messagesToSend.push (std::unique_ptr<std::string>(new std::string(s)));
             _eventCondition.notify_one();
+            return true;
         }
 
     private:
@@ -200,7 +201,6 @@ namespace znet {
 namespace znet {
 
     static void lineTcpClientOnConnection(void *ud, zn_Tcp *tcp, unsigned err);
-    static void lineTcpClientOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
     static void lineTcpClientOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
 
     struct LineTcpClient::Impl
@@ -220,6 +220,8 @@ namespace znet {
         int numConnectionAttempts = 0;
 
         TcpLineReader lineReader;
+
+        MessageSender messageSender;
 
         void onConnection (unsigned err)
         {
@@ -245,6 +247,8 @@ namespace znet {
 
             recvBuffer.resize (2048);
             zn_recv(tcp, recvBuffer.data(), (unsigned)recvBuffer.size(), lineTcpClientOnRecv, this);
+
+            messageSender.start (tcp);
 
             fprintf(stderr, "[%p] client connected to server now!\n", tcp);
             connected = true;
@@ -294,13 +298,6 @@ namespace znet {
         impl->onConnection (err);        
     }
 
-    static void lineTcpClientOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
-        auto* data = reinterpret_cast<TcpSendData<LineTcpClient::Impl>*>(ud);
-        data->impl->onMessageSent(err, count);
-        delete data; // it was allocated on the heap.
-        data = nullptr;
-    }
-
     static void lineTcpClientOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
         LineTcpClient::Impl *impl = (LineTcpClient::Impl*)ud;
         impl->onMessageReceived (err, count);
@@ -337,6 +334,7 @@ namespace znet {
 
     bool LineTcpClient::disconnect ()
     {
+        d->messageSender.stop ();
         zn_close(d->state);
         zn_deinitialize();
         return true;
@@ -350,12 +348,7 @@ namespace znet {
             return false;
         }
 
-        auto* data = new TcpSendData<LineTcpClient::Impl>();
-        data->impl = d.get();
-        data->str = std::move(str);
-
-        zn_send(d->tcp, str.c_str(), (unsigned)str.size(), lineTcpClientOnMessageSent, data);
-        return true;
+        return d->messageSender.sendString (str);
     }
 
     void LineTcpClient::runLoop ()
@@ -366,6 +359,7 @@ namespace znet {
             fprintf(stderr, "[%p] client runloop finished: %s\n",
                     d->tcp, zn_strerror(err));
         }
+        d->messageSender.stop ();
     }
 
 } // znet
@@ -373,7 +367,6 @@ namespace znet {
 namespace znet {
     
         static void lineTcpServerOnAccept(void *ud, zn_Accept *accept, unsigned err, zn_Tcp *tcp);
-        static void lineTcpServerOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
         static void lineTcpServerOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count);
     
         struct LineTcpServer::Impl
@@ -478,13 +471,6 @@ namespace znet {
             impl->onAccept (err, tcp);
         }
     
-        static void lineTcpServerOnMessageSent(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
-            auto* data = reinterpret_cast<TcpSendData<LineTcpServer::Impl>*>(ud);
-            data->impl->onMessageSent (err, count);
-            delete data; // it was allocated on the heap.
-            data = nullptr;
-        }
-    
         static void lineTcpServerOnRecv(void *ud, zn_Tcp *tcp, unsigned err, unsigned count) {
             LineTcpServer::Impl *impl = (LineTcpServer::Impl*)ud;
             impl->onMessageReceived (err, count);
@@ -560,14 +546,7 @@ namespace znet {
                 return false;
             }
 
-            d->messageSender.sendString (str);
-
-            // auto* data = new TcpSendData<LineTcpServer::Impl>();
-            // data->impl = d.get();
-            // data->str = std::move(str);
-
-            // zn_send(d->tcp, data->str.c_str(), (unsigned)data->str.size(), lineTcpServerOnMessageSent, data);
-            return true;
+            return d->messageSender.sendString (str);
         }
         
         void LineTcpServer::runLoop ()
@@ -611,7 +590,7 @@ int mainClient()
         }
     });
 
-    tcpClient.connectToServer ("127.0.0.1", 4999);
+    tcpClient.connectToServer ("127.0.0.1", 4998);
     tcpClient.runLoop ();
     return 0;
 }
@@ -656,9 +635,9 @@ int mainServer()
 
 int main ()
 {
-    return mainServer ();
+    // return mainServer ();
     
     // Test server on macOS
-    // socat -v tcp-l:4999,reuseaddr,fork exec:'/bin/cat'
-    // return mainClient ();
+    // socat -v tcp-l:4998,reuseaddr,fork exec:'/bin/cat'
+    return mainClient ();
 }
