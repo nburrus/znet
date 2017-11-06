@@ -749,11 +749,11 @@ int mainServer()
     return 0;
 }
 
-int main ()
-{
-    // return mainServer ();
+// int main ()
+// {
+//     // return mainServer ();
     
-    // Test server on macOS
-    // socat -v tcp-l:4998,reuseaddr,fork exec:'/bin/cat'
-    return mainClient ();
-}
+//     // Test server on macOS
+//     // socat -v tcp-l:4998,reuseaddr,fork exec:'/bin/cat'
+//     return mainClient ();
+// }
