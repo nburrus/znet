@@ -1,6 +1,8 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <vector>
+#include <atomic>
 
 namespace znet
 {
@@ -57,6 +59,35 @@ namespace znet
 
     private:
         std::unique_ptr<Impl> d;
+    };
+
+    class ClockSynchronizer
+    {
+    private:
+        struct ClockRequest
+        {
+            uint64_t msecsClient = 0;
+            int requestId = -1;
+        };
+
+    public:
+        ClockSynchronizer(LineTcpClient* client, LineTcpServer* server);
+
+        void clientStartSynchronizing();
+        void onReceiveLineFromServer(const std::string& line);
+        void onReceiveLineFromClient(const std::string& line);
+
+    private:
+        void sendSyncRequest();
+
+    private:
+        const int _numRequestsToAverage = 100;
+        LineTcpClient* _client = nullptr;
+        LineTcpServer* _server = nullptr;
+        int _nextRequestId = 0;
+        std::vector<ClockRequest> _requests;
+        std::vector<double> _clockOffsets;
+        std::atomic<double> _estimatedClientFromServerOffset{ NAN };
     };
 
 } // znet

@@ -574,123 +574,105 @@ namespace znet {
 
 namespace znet {
 
-    class ClockSynchronizer
+    ClockSynchronizer::ClockSynchronizer (LineTcpClient* client, LineTcpServer* server)
+    : _client (client), _server(server)
+    {}
+
+    void ClockSynchronizer::clientStartSynchronizing ()
     {
-        struct ClockRequest
-        {
-            uint64_t msecsClient = 0;
-            int requestId = -1;
-        };
+        _requests.resize (_numRequestsToAverage);
+        _clockOffsets.reserve (_numRequestsToAverage);
+        sendSyncRequest ();
+    }
 
-    public:
-        ClockSynchronizer (LineTcpClient* client, LineTcpServer* server)
-        : _client (client), _server(server)
-        {}
+    void ClockSynchronizer::sendSyncRequest ()
+    {
+        std::stringstream ss;
+            
+        auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        ss << "CLOCK " << _nextRequestId << std::endl;
 
-        void clientStartSynchronizing ()
+        auto& rq = _requests[_nextRequestId];
+        rq.msecsClient = nowClientMicrosecs;
+        rq.requestId = _nextRequestId;
+
+        _client->sendString (ss.str());
+
+        ++_nextRequestId;
+    }
+
+    void ClockSynchronizer::onReceiveLineFromServer (const std::string& line)
+    {
+        auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            
+        std::istringstream stream (line);
+        std::string command;
+        stream >> command;
+        if (stream.fail())
+            return;
+        if (command != "CLOCK")
+            return;
+        int requestId = -1;
+        stream >> requestId;
+        if (stream.fail())
+            return;
+
+        uint64_t serverNowMsecs = 0;
+        stream >> serverNowMsecs;
+        if (stream.fail())
+            return;
+
+        assert (requestId < _requests.size());
+        auto& rq = _requests[requestId];
+        const int64_t latencyMsecs = nowClientMicrosecs - rq.msecsClient;
+        const int64_t deltaMsecs = serverNowMsecs - rq.msecsClient - (latencyMsecs/2);
+        fprintf (stderr, "Offset in usecs = %lld (latency=%lld)\n", deltaMsecs, latencyMsecs);
+
+        _clockOffsets.push_back (deltaMsecs);
+
+        if (_clockOffsets.size() < _numRequestsToAverage)
         {
-            _requests.resize (_numRequestsToAverage);
-            _clockOffsets.reserve (_numRequestsToAverage);
             sendSyncRequest ();
         }
+        else
+        {            
+            std::sort (_clockOffsets.begin(), _clockOffsets.end()); 
+            // take the median value and go to seconds.            
+            double offset = _clockOffsets[_clockOffsets.size()/2] * 1e-6;
+            _estimatedClientFromServerOffset = offset;
 
-        void sendSyncRequest ()
-        {
-            std::stringstream ss;
-            
-            auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-            ss << "CLOCK " << _nextRequestId << std::endl;
-
-            auto& rq = _requests[_nextRequestId];
-            rq.msecsClient = nowClientMicrosecs;
-            rq.requestId = _nextRequestId;
-
-            _client->sendString (ss.str());
-
-            ++_nextRequestId;
-        }
-
-        void onReceiveLineFromServer (const std::string& line)
-        {
-            auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-            
-            std::istringstream stream (line);
-            std::string command;
-            stream >> command;
-            if (stream.fail())
-                return;
-            if (command != "CLOCK")
-                return;
-            int requestId = -1;
-            stream >> requestId;
-            if (stream.fail())
-                return;
-
-            uint64_t serverNowMsecs = 0;
-            stream >> serverNowMsecs;
-            if (stream.fail())
-                return;
-
-            assert (requestId < _requests.size());
-            auto& rq = _requests[requestId];
-            const int64_t latencyMsecs = nowClientMicrosecs - rq.msecsClient;
-            const int64_t deltaMsecs = serverNowMsecs - rq.msecsClient - (latencyMsecs/2);
-            fprintf (stderr, "Offset in usecs = %lld (latency=%lld)\n", deltaMsecs, latencyMsecs);
-
-            _clockOffsets.push_back (deltaMsecs);
-
-            if (_clockOffsets.size() < _numRequestsToAverage)
+            fprintf (stderr, "Offsets ");
+            for (int i = 0; i < _clockOffsets.size(); ++i)
             {
-                sendSyncRequest ();
+                fprintf (stderr, "%f ", _clockOffsets[i]*1e-6);
             }
-            else
-            {            
-                std::sort (_clockOffsets.begin(), _clockOffsets.end()); 
-                // take the median value and go to seconds.            
-                double offset = _clockOffsets[_clockOffsets.size()/2] * 1e-6;
-                _estimatedClientFromServerOffset = offset;
-
-                fprintf (stderr, "Offsets ");
-                for (int i = 0; i < _clockOffsets.size(); ++i)
-                {
-                    fprintf (stderr, "%f ", _clockOffsets[i]*1e-6);
-                }
-                fprintf (stderr, "\n");
-                fprintf (stderr, "Median clock offset = %f\n", offset);
-            }
+            fprintf (stderr, "\n");
+            fprintf (stderr, "Median clock offset = %f\n", offset);
         }
+    }
 
-        void onReceiveLineFromClient (const std::string& line)
-        {
-            std::istringstream stream (line);
-            std::string command;
-            stream >> command;
-            fprintf (stderr, "CLOCK received command '%s'\n", command.c_str());
-            if (stream.fail())
-                return;
-            if (command != "CLOCK")
-                return;
-            int requestId = -1;
-            stream >> requestId;
-            if (stream.fail())
-                return;
+    void ClockSynchronizer::onReceiveLineFromClient (const std::string& line)
+    {
+        std::istringstream stream (line);
+        std::string command;
+        stream >> command;
+        fprintf (stderr, "CLOCK received command '%s'\n", command.c_str());
+        if (stream.fail())
+            return;
+        if (command != "CLOCK")
+            return;
+        int requestId = -1;
+        stream >> requestId;
+        if (stream.fail())
+            return;
 
-            std::stringstream ss;
+        std::stringstream ss;
 
-            auto nowMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-            ss << "CLOCK " << requestId << " " << nowMicrosecs << std::endl;
-            _server->sendString(ss.str());
-        }
+        auto nowMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        ss << "CLOCK " << requestId << " " << nowMicrosecs << std::endl;
+        _server->sendString(ss.str());
+    }
 
-    private:
-        const int _numRequestsToAverage = 100;
-        LineTcpClient* _client = nullptr;
-        LineTcpServer* _server = nullptr;
-        int _nextRequestId = 0;
-        std::vector<ClockRequest> _requests;
-        std::vector<double> _clockOffsets;
-        std::atomic<double> _estimatedClientFromServerOffset { NAN };
-    };
 } // znet
 
 int mainClient()

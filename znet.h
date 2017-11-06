@@ -671,13 +671,16 @@ ZN_API int zn_send(zn_Tcp *tcp, const char *buff, unsigned len, zn_SendHandler *
     if (cb == NULL || len == 0)           return ZN_EPARAM;
     tcp->send_buffer.buf = (char*)buff;
     tcp->send_buffer.len = len;
+    tcp->send_handler = cb;
+    tcp->send_ud = ud;
     if ((ret = znP_send(tcp)) != ZN_OK) {
         tcp->send_buffer.buf = NULL;
         tcp->send_buffer.len = 0;
+        tcp->send_handler = NULL;
+        tcp->send_ud = NULL;
     }
     else {
-        tcp->send_handler = cb;
-        tcp->send_ud = ud;
+        assert(cb);
         zn_retain(tcp->S);
     }
     return ret;
@@ -690,13 +693,15 @@ ZN_API int zn_recv(zn_Tcp *tcp, char *buff, unsigned len, zn_RecvHandler *cb, vo
     if (cb == NULL || len == 0)           return ZN_EPARAM;
     tcp->recv_buffer.buf = buff;
     tcp->recv_buffer.len = len;
+    tcp->recv_handler = cb;
+    tcp->recv_ud = ud;
     if ((ret = znP_recv(tcp)) != ZN_OK) {
         tcp->recv_buffer.buf = NULL;
         tcp->recv_buffer.len = 0;
+        tcp->recv_handler = NULL;
+        tcp->recv_ud = NULL;
     }
     else {
-        tcp->recv_handler = cb;
-        tcp->recv_ud = ud;
         zn_retain(tcp->S);
     }
     return ret;
