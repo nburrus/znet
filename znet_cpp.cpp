@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <sstream>
 #include <chrono>
+#include <cmath>
 
 namespace znet {
     
@@ -588,8 +589,13 @@ namespace znet {
 
         void clientStartSynchronizing ()
         {
-            _requests.resize (10);
+            _requests.resize (_numRequestsToAverage);
+            _clockOffsets.reserve (_numRequestsToAverage);
+            sendSyncRequest ();
+        }
 
+        void sendSyncRequest ()
+        {
             std::stringstream ss;
             
             auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -606,6 +612,8 @@ namespace znet {
 
         void onReceiveLineFromServer (const std::string& line)
         {
+            auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            
             std::istringstream stream (line);
             std::string command;
             stream >> command;
@@ -625,7 +633,31 @@ namespace znet {
 
             assert (requestId < _requests.size());
             auto& rq = _requests[requestId];
-            fprintf (stderr, "Offset in usecs = %lld\n", serverNowMsecs - rq.msecsClient);
+            const int64_t latencyMsecs = nowClientMicrosecs - rq.msecsClient;
+            const int64_t deltaMsecs = serverNowMsecs - rq.msecsClient - (latencyMsecs/2);
+            fprintf (stderr, "Offset in usecs = %lld (latency=%lld)\n", deltaMsecs, latencyMsecs);
+
+            _clockOffsets.push_back (deltaMsecs);
+
+            if (_clockOffsets.size() < _numRequestsToAverage)
+            {
+                sendSyncRequest ();
+            }
+            else
+            {            
+                std::sort (_clockOffsets.begin(), _clockOffsets.end()); 
+                // take the median value and go to seconds.            
+                double offset = _clockOffsets[_clockOffsets.size()/2] * 1e-6;
+                _estimatedClientFromServerOffset = offset;
+
+                fprintf (stderr, "Offsets ");
+                for (int i = 0; i < _clockOffsets.size(); ++i)
+                {
+                    fprintf (stderr, "%f ", _clockOffsets[i]*1e-6);
+                }
+                fprintf (stderr, "\n");
+                fprintf (stderr, "Median clock offset = %f\n", offset);
+            }
         }
 
         void onReceiveLineFromClient (const std::string& line)
@@ -646,15 +678,18 @@ namespace znet {
             std::stringstream ss;
 
             auto nowMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-            ss << "CLOCK " << _nextRequestId << " " << nowMicrosecs << std::endl;
+            ss << "CLOCK " << requestId << " " << nowMicrosecs << std::endl;
             _server->sendString(ss.str());
         }
 
     private:
+        const int _numRequestsToAverage = 100;
         LineTcpClient* _client = nullptr;
         LineTcpServer* _server = nullptr;
         int _nextRequestId = 0;
         std::vector<ClockRequest> _requests;
+        std::vector<double> _clockOffsets;
+        std::atomic<double> _estimatedClientFromServerOffset { NAN };
     };
 } // znet
 
@@ -734,9 +769,9 @@ int mainServer()
 
 int main ()
 {
-    return mainServer ();
+    // return mainServer ();
     
     // Test server on macOS
     // socat -v tcp-l:4998,reuseaddr,fork exec:'/bin/cat'
-    // return mainClient ();
+    return mainClient ();
 }
