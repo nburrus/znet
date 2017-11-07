@@ -136,11 +136,15 @@ namespace znet {
             _hasMessageInFlight = true;
             _numBytesSentFromFrontString = 0;
             auto* str = _messagesToSend.front().get();
-            zn_send(_tcp,
-                    str->c_str(),
-                    (unsigned)str->size(),
-                    messageSenderOnMessageSent,
-                    this);
+            int err = zn_send(_tcp,
+                        str->c_str(),
+                        (unsigned)str->size(),
+                        messageSenderOnMessageSent,
+                        this);
+            if (err != ZN_OK)
+            {
+                _hasMessageInFlight = false;
+            }
         }
 
     public: // fake public for the static function.
