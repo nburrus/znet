@@ -322,7 +322,7 @@ namespace znet {
                 return;
             }
 
-            std::cerr << "client received " << count << " bytes" << std::endl;
+            // std::cerr << "client received " << count << " bytes" << std::endl;
             lineReader.processNewInputData (recvBuffer, count, lineReceivedCb);
             zn_recv(tcp, recvBuffer.data(), (unsigned)recvBuffer.size(), lineTcpClientOnRecv, this);
         }
