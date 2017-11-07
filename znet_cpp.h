@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <atomic>
+#include <cmath>
 
 namespace znet
 {
@@ -77,6 +78,8 @@ namespace znet
         void onReceiveLineFromServer(const std::string& line);
         void onReceiveLineFromClient(const std::string& line);
 
+        double estimatedClientFromServerOffset () const { return _estimatedClientFromServerOffset; }
+        
     private:
         void sendSyncRequest();
 

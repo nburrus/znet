@@ -15,7 +15,47 @@
 #include <chrono>
 #include <cmath>
 
+#if __APPLE__
+#   include <mach/mach_time.h>
+#endif
+
 namespace znet {
+
+    uint64_t nowMicroseconds ()
+    {
+#if __APPLE__
+        //////////////////////////////////
+        //  READ BEFORE MAKING CHANGES
+        //
+        // This code needs to be in correspondence
+        // with driver code which will set the timestamp
+        // for incoming data. To properly make timing comparisons
+        // the timestamps need to come from the same clock source.
+        //
+        // If you change this code, change the driver code as well.
+        //
+        // Some places you might need to change:
+        // StructureCoreDriver.mm
+        // StructureCoreClient.cpp
+        //
+        ///////////////////////////////////
+        
+        mach_timebase_info_data_t timebase;
+        
+        kern_return_t status = mach_timebase_info(&timebase);
+        
+        const double machToMicroseconds = (status == 0)
+        ? 1e-3 * double(timebase.numer) / double(timebase.denom)
+        : 0.0
+        ;
+        
+        const double machTime = mach_absolute_time();
+        
+        return (uint64_t)(machToMicroseconds * machTime);
+#else
+        return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+#endif
+    }
     
     template <class ImplT>
     struct TcpSendData
@@ -173,9 +213,9 @@ namespace znet {
             auto bufferEndIt = recvBuffer.begin() + count;
             auto bufferStartIt = recvBuffer.begin();
 
-            std::string debugStr (bufferStartIt, bufferEndIt);
-            std::cerr << "inputStr = " << debugStr << std::endl;
-            std::cerr << "inputStr.back() = " << (int)debugStr.back() << std::endl;
+            //            std::string debugStr (bufferStartIt, bufferEndIt);
+            //            std::cerr << "inputStr = " << debugStr << std::endl;
+            //            std::cerr << "inputStr.back() = " << (int)debugStr.back() << std::endl;
 
             do {
                 bool foundEndOfLine = false;
@@ -585,11 +625,13 @@ namespace znet {
         sendSyncRequest ();
     }
 
+    
+    
     void ClockSynchronizer::sendSyncRequest ()
     {
         std::stringstream ss;
             
-        auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto nowClientMicrosecs = nowMicroseconds();
         ss << "CLOCK " << _nextRequestId << std::endl;
 
         auto& rq = _requests[_nextRequestId];
@@ -603,7 +645,7 @@ namespace znet {
 
     void ClockSynchronizer::onReceiveLineFromServer (const std::string& line)
     {
-        auto nowClientMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto nowClientMicrosecs = nowMicroseconds();
             
         std::istringstream stream (line);
         std::string command;
@@ -668,7 +710,7 @@ namespace znet {
 
         std::stringstream ss;
 
-        auto nowMicrosecs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto nowMicrosecs = nowMicroseconds();
         ss << "CLOCK " << requestId << " " << nowMicrosecs << std::endl;
         _server->sendString(ss.str());
     }
@@ -697,12 +739,12 @@ int mainClient()
     std::thread t ([&tcpClient](){
         while (true)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            tcpClient.sendString ("proutFromThread\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            tcpClient.sendString ("REQUEST_POSES 1\n");
         }
     });
 
-    tcpClient.connectToServer ("127.0.0.1", 4998);
+    tcpClient.connectToServer ("192.168.1.39", 4998);
     tcpClient.runLoop ();
     return 0;
 }
