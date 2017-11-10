@@ -124,10 +124,16 @@ namespace znet {
                 }
             }
 
-            while (_hasMessageInFlight)
+            for (int i = 0; i < 5 && _hasMessageInFlight; ++i)
             {
                 fprintf(stderr, "Waiting for in-flight messages...\n");
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (_hasMessageInFlight)
+            {
+                fprintf(stderr, "Error: the message we had never got sent, aborting.\n");
+                _hasMessageInFlight = false;
             }
         }
 
@@ -503,7 +509,11 @@ namespace znet {
                 zn_deltcp(tcp); /* and we close connection. */
                 tcp = nullptr;
                 if (clientDisconnectedCb)
-                    clientDisconnectedCb(activeConnectionId);                
+                    clientDisconnectedCb(activeConnectionId);         
+                
+                // Finished the loop, means the client disconnected. Now
+                // create a new accept to get ready for a new client.
+                zn_accept(accept, lineTcpServerOnAccept, this);
             }
         };
     
@@ -606,11 +616,8 @@ namespace znet {
                 {
                     fprintf(stderr, "[%p] client runloop finished: %s\n",
                             d->tcp, zn_strerror(err));
+                    d->closeConnection();
                 }
-
-                // Finished the loop, means the client disconnected. Now
-                // create a new accept to get ready for a new client.
-                zn_accept(d->accept, lineTcpServerOnAccept, d.get());
             }
         }
     
