@@ -85,11 +85,14 @@ namespace znet {
 
         void stop ()
         {
-            _shouldExit = true;
-            _eventCondition.notify_one();
-            _loopThread.join ();
-            _tcp = nullptr;
-            while (!_messagesToSend.empty()) _messagesToSend.pop();
+            if (_tcp)
+            {
+                _shouldExit = true;
+                _eventCondition.notify_one();
+                _loopThread.join ();
+                _tcp = nullptr;
+                while (!_messagesToSend.empty()) _messagesToSend.pop();
+            }
         }
 
         bool sendString (const std::string& s)
